@@ -30,7 +30,7 @@ def get_base_hyperparameters():
         'pre_sample_weights': True,           # Pre-sample MLP weights
         'prior_mlp_dropout_prob': 0.2,        # Dropout probability
         'pre_sample_causes': True,            # Pre-sample causal structure
-        'prior_mlp_activations': lambda: torch.nn.ReLU(),  # Activation function
+        'prior_mlp_activations': 'relu',  # Activation function
         'block_wise_dropout': False,
         'prior_mlp_scale_weights_sqrt': True,
         'init_std': 1.0,
@@ -106,7 +106,7 @@ config_binary = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.1,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.Tanh(),
+    'prior_mlp_activations': 'tanh',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -173,7 +173,7 @@ config_multiclass = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.15,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.ReLU(),
+    'prior_mlp_activations': 'relu',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -242,7 +242,7 @@ config_regression = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.1,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.LeakyReLU(),
+    'prior_mlp_activations': 'leaky_relu',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -307,7 +307,7 @@ config_challenging = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.2,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.Tanh(),
+    'prior_mlp_activations': 'tanh',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,

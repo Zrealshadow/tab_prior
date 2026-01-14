@@ -20,7 +20,7 @@ hyperparameters = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.1,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.Tanh(),
+    'prior_mlp_activations': 'tanh',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -33,7 +33,7 @@ hyperparameters = {
 
     # Classification wrapper config
     'num_classes': 3,  # For 3-class classification
-    'balanced': True,
+    'balanced': False,  # balanced only works for binary classification
     'multiclass_type': 'rank',
     'output_multiclass_ordered_p': 0.5,
     'nan_prob_no_reason': 0.1,

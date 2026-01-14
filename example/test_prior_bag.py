@@ -35,7 +35,7 @@ hyperparameters = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.1,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.ReLU(),
+    'prior_mlp_activations': 'relu',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,

@@ -42,7 +42,7 @@ fixed_hyperparameters = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.1,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.ReLU(),
+    'prior_mlp_activations': 'relu',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -117,7 +117,7 @@ fixed_hyperparameters_2 = {
     'pre_sample_weights': True,
     'prior_mlp_dropout_prob': 0.15,
     'pre_sample_causes': True,
-    'prior_mlp_activations': lambda: torch.nn.ReLU(),
+    'prior_mlp_activations': 'relu',
     'block_wise_dropout': False,
     'prior_mlp_scale_weights_sqrt': True,
     'init_std': 1.0,
@@ -159,12 +159,8 @@ print("=" * 70)
 
 differentiable_hyperparameters_3 = {
     'prior_mlp_activations': {
-        'distribution': 'meta_choice_mixed',  # For callables
-        'choice_values': [
-            lambda: torch.nn.ReLU(),
-            lambda: torch.nn.Tanh(),
-            lambda: torch.nn.LeakyReLU()
-        ]
+        'distribution': 'meta_choice',  # For string choices
+        'choice_values': ['relu', 'tanh', 'leaky_relu']
     },
     'noise_std': {
         'distribution': 'uniform',  # Simple uniform

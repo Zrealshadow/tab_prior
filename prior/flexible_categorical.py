@@ -1,287 +1,475 @@
-import time
 import random
 
 import torch
 from torch import nn
 
 from .utils import get_batch_to_dataloader
-from .utils import normalize_data, nan_handling_missing_for_unknown_reason_value, nan_handling_missing_for_no_reason_value, nan_handling_missing_for_a_reason_value, to_ranking_low_mem, remove_outliers, normalize_by_used_features_f
-from .utils import randomize_classes, CategoricalActivation
-from .utils import uniform_int_sampler_f
+from .utils import (
+    normalize_data, to_ranking_low_mem, remove_outliers, normalize_by_used_features_f,
+    nan_handling_missing_for_unknown_reason_value, nan_handling_missing_for_no_reason_value,
+    nan_handling_missing_for_a_reason_value, randomize_classes, CategoricalActivation,
+    uniform_int_sampler_f
+)
 
-time_it = False
+
+# =============================================================================
+# Class Assigners: Convert regression targets to classification labels
+# =============================================================================
 
 class BalancedBinarize(nn.Module):
-    def __init__(self):
-        super().__init__()
-
+    """Binary classification with 50/50 split at median."""
     def forward(self, x):
         return (x > torch.median(x)).float()
 
-def class_sampler_f(min_, max_):
-    def s():
-        if random.random() > 0.5:
-            return uniform_int_sampler_f(min_, max_)()
-        return 2
-    return s
 
 class RegressionNormalized(nn.Module):
-    def __init__(self):
-        super().__init__()
-
+    """Keep as regression, normalize to [0, 1] range."""
     def forward(self, x):
-        # x has shape (T,B)
-
-        # TODO: Normalize to -1, 1 or gaussian normal
         maxima = torch.max(x, 0)[0]
         minima = torch.min(x, 0)[0]
-        norm = (x - minima) / (maxima-minima)
+        return (x - minima) / (maxima - minima)
 
-        return norm
+
+def _sample_num_classes(min_classes, max_classes):
+    """Sample number of classes, biased towards 2."""
+    if random.random() > 0.5:
+        return uniform_int_sampler_f(min_classes, max_classes)()
+    return 2
+
 
 class MulticlassRank(nn.Module):
+    """Assign classes based on rank thresholds."""
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
-        self.num_classes = class_sampler_f(2, num_classes)()
+        self.num_classes = _sample_num_classes(2, num_classes)
         self.ordered_p = ordered_p
 
     def forward(self, x):
-        # x has shape (T,B,H)
-
-        # CAUTION: This samples the same idx in sequence for each class boundary in a batch
+        # Sample random positions as class boundaries
         class_boundaries = torch.randint(0, x.shape[0], (self.num_classes - 1,))
         class_boundaries = x[class_boundaries].unsqueeze(1)
-
         d = (x > class_boundaries).sum(axis=0)
 
-        randomized_classes = torch.rand((d.shape[1], )) > self.ordered_p
-        d[:, randomized_classes] = randomize_classes(d[:, randomized_classes], self.num_classes)
-        reverse_classes = torch.rand((d.shape[1],)) > 0.5
-        d[:, reverse_classes] = self.num_classes - 1 - d[:, reverse_classes]
+        # Randomly shuffle classes for some batches
+        randomized = torch.rand((d.shape[1],)) > self.ordered_p
+        d[:, randomized] = randomize_classes(d[:, randomized], self.num_classes)
+
+        # Randomly reverse class order for some batches
+        reverse = torch.rand((d.shape[1],)) > 0.5
+        d[:, reverse] = self.num_classes - 1 - d[:, reverse]
         return d
 
+
 class MulticlassValue(nn.Module):
+    """Assign classes based on fixed random thresholds."""
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
-        self.num_classes = class_sampler_f(2, num_classes)()
-        self.classes = nn.Parameter(torch.randn(self.num_classes-1), requires_grad=False)
+        self.num_classes = _sample_num_classes(2, num_classes)
+        self.classes = nn.Parameter(torch.randn(self.num_classes - 1), requires_grad=False)
         self.ordered_p = ordered_p
 
     def forward(self, x):
-        # x has shape (T,B,H)
-        d = (x > (self.classes.unsqueeze(-1).unsqueeze(-1))).sum(axis=0)
+        d = (x > self.classes.unsqueeze(-1).unsqueeze(-1)).sum(axis=0)
 
-        randomized_classes = torch.rand((d.shape[1],)) > self.ordered_p
-        d[:, randomized_classes] = randomize_classes(d[:, randomized_classes], self.num_classes)
-        reverse_classes = torch.rand((d.shape[1],)) > 0.5
-        d[:, reverse_classes] = self.num_classes - 1 - d[:, reverse_classes]
+        randomized = torch.rand((d.shape[1],)) > self.ordered_p
+        d[:, randomized] = randomize_classes(d[:, randomized], self.num_classes)
+
+        reverse = torch.rand((d.shape[1],)) > 0.5
+        d[:, reverse] = self.num_classes - 1 - d[:, reverse]
         return d
+
 
 class MulticlassMultiNode(nn.Module):
+    """Assign classes using softmax-based multinomial sampling."""
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
-        self.num_classes = class_sampler_f(2, num_classes)()
-        self.classes = nn.Parameter(torch.randn(num_classes-1), requires_grad=False)
-        self.alt_multi_class = MulticlassValue(num_classes, ordered_p)
+        self.num_classes = _sample_num_classes(2, num_classes)
+        self.fallback = MulticlassValue(num_classes, ordered_p)
 
     def forward(self, x):
-        # x has shape T, B, H
         if len(x.shape) == 2:
-            return self.alt_multi_class(x)
-        T = 3
-        x[torch.isnan(x)] = 0.00001
-        d = torch.multinomial(torch.pow(0.00001+torch.sigmoid(x[:, :, 0:self.num_classes]).reshape(-1, self.num_classes), T), 1, replacement=True).reshape(x.shape[0], x.shape[1])#.float()
-        return d
+            return self.fallback(x)
+        x = x.clone()
+        x[torch.isnan(x)] = 1e-5
+        probs = torch.sigmoid(x[:, :, :self.num_classes]).reshape(-1, self.num_classes)
+        probs = torch.pow(probs + 1e-5, 3)  # temperature=3
+        d = torch.multinomial(probs, 1, replacement=True)
+        return d.reshape(x.shape[0], x.shape[1])
 
+
+def _create_class_assigner(num_classes, balanced, multiclass_type, ordered_p):
+    """Factory function to create the appropriate class assigner."""
+    if num_classes == 0:
+        return RegressionNormalized()
+
+    if num_classes == 2 and balanced:
+        return BalancedBinarize()
+
+    if num_classes > 2 and balanced:
+        raise NotImplementedError("Balanced multiclass (>2 classes) is not supported")
+
+    # Unbalanced multiclass
+    assigners = {
+        'rank': lambda: MulticlassRank(num_classes, ordered_p),
+        'value': lambda: MulticlassValue(num_classes, ordered_p),
+        'multi_node': lambda: MulticlassMultiNode(num_classes, ordered_p),
+    }
+    if multiclass_type not in assigners:
+        raise ValueError(f"Unknown multiclass_type: {multiclass_type}")
+    return assigners[multiclass_type]()
+
+
+# =============================================================================
+# FlexibleCategorical: Post-processing wrapper for data generation
+# =============================================================================
 
 class FlexibleCategorical(torch.nn.Module):
-    def __init__(self, get_batch, hyperparameters, args):
-        super(FlexibleCategorical, self).__init__()
+    """
+    Wraps a data generator (MLP/GP) and applies post-processing:
+    1. Add missing values (MCAR, MAR, or unknown)
+    2. Convert some features to categorical
+    3. Normalize features
+    4. Convert regression targets to classification
+    5. Pad with zero features
+    6. Normalize labels
+    """
 
-        self.h = {k: hyperparameters[k]() if callable(hyperparameters[k]) else hyperparameters[k] for k in
-                                hyperparameters.keys()}
+    def __init__(self, get_batch, hyperparameters, args):
+        super().__init__()
+        self.h = hyperparameters
         self.args = args
-        self.args_passed = {**self.args}
-        self.args_passed.update({'num_features': self.h['num_features_used']})
         self.get_batch = get_batch
 
-        if self.h['num_classes'] == 0:
-            self.class_assigner = RegressionNormalized()
-        else:
-            if self.h['num_classes'] > 1 and not self.h['balanced']:
-                if self.h['multiclass_type'] == 'rank':
-                    self.class_assigner = MulticlassRank(self.h['num_classes']
-                                                 , ordered_p=self.h['output_multiclass_ordered_p']
-                                                 )
-                elif self.h['multiclass_type'] == 'value':
-                    self.class_assigner = MulticlassValue(self.h['num_classes']
-                                                         , ordered_p=self.h['output_multiclass_ordered_p']
-                                                         )
-                elif self.h['multiclass_type'] == 'multi_node':
-                    self.class_assigner = MulticlassMultiNode(self.h['num_classes'])
-                else:
-                    raise ValueError("Unknow Multiclass type")
-            elif self.h['num_classes'] == 2 and self.h['balanced']:
-                self.class_assigner = BalancedBinarize()
-            elif self.h['num_classes'] > 2 and self.h['balanced']:
-                raise NotImplementedError("Balanced multiclass training is not possible")
+        self._validate_hyperparameters()
 
-    def drop_for_reason(self, x, v):
-        nan_prob_sampler = CategoricalActivation(ordered_p=0.0
-                                                 , categorical_p=1.0
-                                                 , keep_activation_size=False,
-                                                 num_classes_sampler=lambda: 20)
-        d = nan_prob_sampler(x)
-        # TODO: Make a different ordering for each activation
-        x[d < torch.rand((1,), device=x.device) * 20 * self.h['nan_prob_no_reason'] * random.random()] = v
+        self.class_assigner = _create_class_assigner(
+            num_classes=self.h['num_classes'],
+            balanced=self.h['balanced'],
+            multiclass_type=self.h.get('multiclass_type', 'rank'),
+            ordered_p=self.h.get('output_multiclass_ordered_p', 0.5)
+        )
+
+    def _validate_hyperparameters(self):
+        """Validate hyperparameters and check for conflicts."""
+        h = self.h
+        args = self.args
+
+        # --- Required parameters ---
+        required = ['num_classes', 'balanced', 'nan_prob_no_reason',
+                    'nan_prob_a_reason', 'nan_prob_unknown_reason',
+                    'set_value_to_nan', 'normalize_to_ranking', 'num_features_used']
+        missing = [k for k in required if k not in h]
+        if missing:
+            raise ValueError(f"Missing required hyperparameters: {missing}")
+
+        # --- Classification validation ---
+        if h['num_classes'] < 0:
+            raise ValueError(f"num_classes must be >= 0, got {h['num_classes']}")
+
+        if h['num_classes'] > 2 and h['balanced']:
+            raise ValueError(
+                f"balanced=True only works with binary classification (num_classes=2), "
+                f"but got num_classes={h['num_classes']}"
+            )
+
+        if h['num_classes'] > 1 and not h['balanced']:
+            valid_types = ['rank', 'value', 'multi_node']
+            mtype = h.get('multiclass_type', 'rank')
+            if mtype not in valid_types:
+                raise ValueError(f"multiclass_type must be one of {valid_types}, got '{mtype}'")
+
+        # --- Probability validation ---
+        prob_params = ['nan_prob_no_reason', 'nan_prob_a_reason', 'nan_prob_unknown_reason',
+                       'set_value_to_nan', 'output_multiclass_ordered_p', 'categorical_feature_p']
+        for param in prob_params:
+            if param in h:
+                val = h[param]
+                if not (0 <= val <= 1):
+                    raise ValueError(f"{param} must be in [0, 1], got {val}")
+
+        # --- Feature validation ---
+        num_features_used = h['num_features_used']
+        num_features = args.get('num_features', num_features_used)
+
+        if num_features_used <= 0:
+            raise ValueError(f"num_features_used must be > 0, got {num_features_used}")
+
+        if num_features_used > num_features:
+            raise ValueError(
+                f"num_features_used ({num_features_used}) cannot exceed "
+                f"num_features ({num_features})"
+            )
+
+        # --- Warn about potential issues ---
+        if h.get('check_is_compatible', False) and 'single_eval_pos' not in args:
+            import warnings
+            warnings.warn(
+                "check_is_compatible=True but single_eval_pos not provided. "
+                "Will use seq_len // 2 as default."
+            )
+
+    # -------------------------------------------------------------------------
+    # Step 1: Generate raw data
+    # -------------------------------------------------------------------------
+    def _generate_raw_data(self):
+        """Get raw data from underlying generator."""
+        args = {**self.args, 'num_features': self.h['num_features_used']}
+        return self.get_batch(hyperparameters=self.h, **args)
+
+    # -------------------------------------------------------------------------
+    # Step 2: Add missing values
+    # -------------------------------------------------------------------------
+    def _add_missing_values(self, x):
+        """Inject missing values with different patterns."""
+        h = self.h
+        total_nan_prob = h['nan_prob_no_reason'] + h['nan_prob_a_reason'] + h['nan_prob_unknown_reason']
+
+        # Only apply to ~50% of batches
+        if total_nan_prob <= 0 or random.random() > 0.5:
+            return x
+
+        # MCAR: Missing Completely At Random
+        if random.random() < h['nan_prob_no_reason']:
+            value = nan_handling_missing_for_no_reason_value(h['set_value_to_nan'])
+            x = self._drop_random(x, value, h['nan_prob_no_reason'])
+
+        # MAR: Missing At Random (structured)
+        if h['nan_prob_a_reason'] > 0 and random.random() > 0.5:
+            value = nan_handling_missing_for_a_reason_value(h['set_value_to_nan'])
+            x = self._drop_structured(x, value)
+
+        # Unknown: Could be either MCAR or MAR
+        if h['nan_prob_unknown_reason'] > 0:
+            value = nan_handling_missing_for_unknown_reason_value(h['set_value_to_nan'])
+            if random.random() < h.get('nan_prob_unknown_reason_reason_prior', 0.5):
+                x = self._drop_random(x, value, h['nan_prob_no_reason'])
+            else:
+                x = self._drop_structured(x, value)
+
         return x
 
-    def drop_for_no_reason(self, x, v):
-        x[torch.rand(x.shape, device=self.args['device']) < random.random() * self.h['nan_prob_no_reason']] = v
+    def _drop_random(self, x, value, prob):
+        """MCAR: Drop values completely at random."""
+        mask = torch.rand(x.shape, device=x.device) < random.random() * prob
+        x[mask] = value
         return x
 
-    def forward(self, batch_size):
-        start = time.time()
-        x, y, y_ = self.get_batch(hyperparameters=self.h, **self.args_passed)
-        if time_it:
-            print('Flex Forward Block 1', round(time.time() - start, 3))
+    def _drop_structured(self, x, value):
+        """MAR: Drop values based on data patterns."""
+        sampler = CategoricalActivation(
+            ordered_p=0.0, categorical_p=1.0,
+            keep_activation_size=False, num_classes_sampler=lambda: 20
+        )
+        pattern = sampler(x)
+        threshold = torch.rand((1,), device=x.device) * 20 * self.h['nan_prob_no_reason'] * random.random()
+        x[pattern < threshold] = value
+        return x
 
-        start = time.time()
+    # -------------------------------------------------------------------------
+    # Step 3: Convert features to categorical
+    # -------------------------------------------------------------------------
+    def _make_categorical_features(self, x):
+        """Convert some continuous features to categorical."""
+        prob = self.h.get('categorical_feature_p', 0)
+        if prob <= 0 or random.random() >= prob:
+            return x
 
-        if self.h['nan_prob_no_reason']+self.h['nan_prob_a_reason']+self.h['nan_prob_unknown_reason'] > 0 and random.random() > 0.5: # Only one out of two datasets should have nans
-            if random.random() < self.h['nan_prob_no_reason']: # Missing for no reason
-                x = self.drop_for_no_reason(x, nan_handling_missing_for_no_reason_value(self.h['set_value_to_nan']))
+        col_prob = random.random()  # probability for each column
+        for col in range(x.shape[2]):
+            if random.random() < col_prob:
+                num_categories = max(round(random.gammavariate(1, 10)), 2)
+                discretizer = MulticlassRank(num_categories, ordered_p=0.3)
+                x[:, :, col] = discretizer(x[:, :, col])
+        return x
 
-            if self.h['nan_prob_a_reason'] > 0 and random.random() > 0.5: # Missing for a reason
-                x = self.drop_for_reason(x, nan_handling_missing_for_a_reason_value(self.h['set_value_to_nan']))
-
-            if self.h['nan_prob_unknown_reason'] > 0: # Missing for unknown reason  and random.random() > 0.5
-                if random.random() < self.h['nan_prob_unknown_reason_reason_prior']:
-                    x = self.drop_for_no_reason(x, nan_handling_missing_for_unknown_reason_value(self.h['set_value_to_nan']))
-                else:
-                    x = self.drop_for_reason(x, nan_handling_missing_for_unknown_reason_value(self.h['set_value_to_nan']))
-
-        # Categorical features
-        if 'categorical_feature_p' in self.h and random.random() < self.h['categorical_feature_p']:
-            p = random.random()
-            for col in range(x.shape[2]):
-                num_unique_features = max(round(random.gammavariate(1,10)),2)
-                m = MulticlassRank(num_unique_features, ordered_p=0.3)
-                if random.random() < p:
-                    x[:, :, col] = m(x[:, :, col])
-
-        if time_it:
-            print('Flex Forward Block 2', round(time.time() - start, 3))
-            start = time.time()
-
+    # -------------------------------------------------------------------------
+    # Step 4: Normalize features
+    # -------------------------------------------------------------------------
+    def _normalize_features(self, x, y):
+        """Normalize features using ranking or z-score."""
         if self.h['normalize_to_ranking']:
             x = to_ranking_low_mem(x)
         else:
             x = remove_outliers(x)
-        x, y = normalize_data(x), normalize_data(y)
+        return normalize_data(x), normalize_data(y)
 
-        if time_it:
-            print('Flex Forward Block 3', round(time.time() - start, 3))
-            start = time.time()
+    # -------------------------------------------------------------------------
+    # Step 5: Convert to classification
+    # -------------------------------------------------------------------------
+    def _assign_classes(self, y):
+        """Convert regression targets to class labels."""
+        return self.class_assigner(y).float()
 
-        # Cast to classification if enabled
-        y = self.class_assigner(y).float()
+    # -------------------------------------------------------------------------
+    # Step 6: Scale and pad features
+    # -------------------------------------------------------------------------
+    def _scale_and_pad_features(self, x):
+        """Scale by feature ratio and pad with zeros."""
+        num_used = self.h['num_features_used']
+        num_total = self.args['num_features']
 
-        if time_it:
-            print('Flex Forward Block 4', round(time.time() - start, 3))
-            start = time.time()
-        if self.h['normalize_by_used_features']:
-            x = normalize_by_used_features_f(x, self.h['num_features_used'], self.args['num_features'], normalize_with_sqrt=self.h.get('normalize_with_sqrt',False))
-        if time_it:
-            print('Flex Forward Block 5', round(time.time() - start, 3))
+        # Scale to compensate for zero padding
+        if self.h.get('normalize_by_used_features', False):
+            x = normalize_by_used_features_f(
+                x, num_used, num_total,
+                normalize_with_sqrt=self.h.get('normalize_with_sqrt', False)
+            )
 
-        start = time.time()
-        # Append empty features if enabled
-        x = torch.cat(
-            [x, torch.zeros((x.shape[0], x.shape[1], self.args['num_features'] - self.h['num_features_used']),
-                            device=self.args['device'])], -1)
-        if time_it:
-            print('Flex Forward Block 6', round(time.time() - start, 3))
+        # Pad with zeros
+        if num_used < num_total:
+            padding = torch.zeros(
+                (x.shape[0], x.shape[1], num_total - num_used),
+                device=self.args['device']
+            )
+            x = torch.cat([x, padding], dim=-1)
 
-        if torch.isnan(y).sum() > 0:
-            print('Nans in target!')
+        return x
 
-        if self.h['check_is_compatible']:
-            for b in range(y.shape[1]):
-                is_compatible, N = False, 0
-                while not is_compatible and N < 10:
-                    targets_in_train = torch.unique(y[:self.args['single_eval_pos'], b], sorted=True)
-                    targets_in_eval = torch.unique(y[self.args['single_eval_pos']:, b], sorted=True)
+    # -------------------------------------------------------------------------
+    # Step 7: Ensure train/test compatibility
+    # -------------------------------------------------------------------------
+    def _ensure_class_compatibility(self, x, y):
+        """Ensure train and test sets have the same classes."""
+        if not self.h.get('check_is_compatible', False):
+            return x, y
 
-                    is_compatible = len(targets_in_train) == len(targets_in_eval) and (
-                                targets_in_train == targets_in_eval).all() and len(targets_in_train) > 1
+        eval_pos = self.args.get('single_eval_pos', x.shape[0] // 2)
 
-                    if not is_compatible:
-                        randperm = torch.randperm(x.shape[0])
-                        x[:, b], y[:, b] = x[randperm, b], y[randperm, b]
-                    N = N + 1
-                if not is_compatible:
-                    if not is_compatible:
-                        # todo check that it really does this and how many together
-                        y[:, b] = -100 # Relies on CE having `ignore_index` set to -100 (default)
+        for b in range(y.shape[1]):
+            for _ in range(10):  # max retries
+                train_classes = torch.unique(y[:eval_pos, b], sorted=True)
+                test_classes = torch.unique(y[eval_pos:, b], sorted=True)
 
-        if self.h['normalize_labels']:
-            #assert self.h['output_multiclass_ordered_p'] == 0., "normalize_labels destroys ordering of labels anyways."
-            for b in range(y.shape[1]):
-                valid_labels = y[:,b] != -100
-                if self.h.get('normalize_ignore_label_too', False):
-                    valid_labels[:] = True
-                y[valid_labels, b] = (y[valid_labels, b] > y[valid_labels, b].unique().unsqueeze(1)).sum(axis=0).unsqueeze(0).float()
+                is_compatible = (
+                    len(train_classes) == len(test_classes) and
+                    (train_classes == test_classes).all() and
+                    len(train_classes) > 1
+                )
 
-                if y[valid_labels, b].numel() != 0 and self.h.get('rotate_normalized_labels', True):
-                    num_classes_float = (y[valid_labels, b].max() + 1).cpu()
-                    num_classes = num_classes_float.int().item()
-                    assert num_classes == num_classes_float.item()
-                    random_shift = torch.randint(0, num_classes, (1,), device=self.args['device'])
-                    y[valid_labels, b] = (y[valid_labels, b] + random_shift) % num_classes
+                if is_compatible:
+                    break
 
-        return x, y, y  # x.shape = (T,B,H)
+                # Shuffle to try to get compatible classes
+                perm = torch.randperm(x.shape[0])
+                x[:, b], y[:, b] = x[perm, b], y[perm, b]
+            else:
+                # Mark as invalid (ignore in loss)
+                y[:, b] = -100
 
-import torch.cuda as cutorch
+        return x, y
+
+    # -------------------------------------------------------------------------
+    # Step 8: Normalize labels
+    # -------------------------------------------------------------------------
+    def _normalize_labels(self, y):
+        """Remap labels to consecutive integers (0, 1, 2, ...)."""
+        if not self.h.get('normalize_labels', False):
+            return y
+
+        for b in range(y.shape[1]):
+            valid = y[:, b] != -100
+            if self.h.get('normalize_ignore_label_too', False):
+                valid[:] = True
+
+            if valid.sum() == 0:
+                continue
+
+            # Remap to 0, 1, 2, ...
+            unique_labels = y[valid, b].unique()
+            y[valid, b] = (y[valid, b] > unique_labels.unsqueeze(1)).sum(axis=0).float()
+
+            # Random rotation of labels
+            if self.h.get('rotate_normalized_labels', True) and y[valid, b].numel() > 0:
+                num_classes = int(y[valid, b].max().item()) + 1
+                shift = torch.randint(0, num_classes, (1,), device=self.args['device'])
+                y[valid, b] = (y[valid, b] + shift) % num_classes
+
+        return y
+
+    # -------------------------------------------------------------------------
+    # Main forward pass
+    # -------------------------------------------------------------------------
+    def forward(self, batch_size):
+        # Step 1: Generate raw data
+        x, y, _ = self._generate_raw_data()
+
+        # Step 2: Add missing values
+        x = self._add_missing_values(x)
+
+        # Step 3: Make some features categorical
+        x = self._make_categorical_features(x)
+
+        # Step 4: Normalize features
+        x, y = self._normalize_features(x, y)
+
+        # Step 5: Convert to classification
+        y = self._assign_classes(y)
+
+        # Step 6: Scale and pad features
+        x = self._scale_and_pad_features(x)
+
+        # Step 7: Ensure train/test class compatibility
+        x, y = self._ensure_class_compatibility(x, y)
+
+        # Step 8: Normalize labels
+        y = self._normalize_labels(y)
+
+        return x, y, y
+
+
+# =============================================================================
+# Module-level get_batch function
+# =============================================================================
 
 @torch.no_grad()
-def get_batch(batch_size, seq_len, num_features, get_batch, device, hyperparameters=None, batch_size_per_gp_sample=None, **kwargs):
-    batch_size_per_gp_sample = batch_size_per_gp_sample or (min(32, batch_size))
+def get_batch(batch_size, seq_len, num_features, get_batch, device,
+              hyperparameters=None, batch_size_per_gp_sample=None, **kwargs):
+    """
+    Generate a batch of data using FlexibleCategorical wrapper.
+
+    Args:
+        batch_size: Total batch size
+        seq_len: Sequence length (number of samples)
+        num_features: Total number of features (including padding)
+        get_batch: Underlying data generator (e.g., mlp.get_batch)
+        device: torch device
+        hyperparameters: Configuration dict
+        batch_size_per_gp_sample: Sub-batch size for each model
+    """
+    batch_size_per_gp_sample = batch_size_per_gp_sample or min(32, batch_size)
     num_models = batch_size // batch_size_per_gp_sample
-    assert num_models > 0, f'Batch size ({batch_size}) is too small for batch_size_per_gp_sample ({batch_size_per_gp_sample})'
+
+    assert num_models > 0, f'Batch size ({batch_size}) too small for batch_size_per_gp_sample ({batch_size_per_gp_sample})'
     assert num_models * batch_size_per_gp_sample == batch_size, f'Batch size ({batch_size}) not divisible by batch_size_per_gp_sample ({batch_size_per_gp_sample})'
 
-    # Sample one seq_len for entire batch
-    seq_len = hyperparameters['seq_len_used']() if 'seq_len_used' in hyperparameters and callable(hyperparameters['seq_len_used']) else seq_len
-    # pad num_feature_used
-    hyperparameters['num_features_used'] = hyperparameters['num_features_used']() if 'num_features_used' in hyperparameters and callable(hyperparameters['num_features_used']) else num_features
-    args = {'device': device, 'seq_len': seq_len, 'num_features': num_features, 'batch_size': batch_size_per_gp_sample, **kwargs}
+    # Resolve seq_len and num_features_used if they are samplers
+    if 'seq_len_used' in hyperparameters and callable(hyperparameters['seq_len_used']):
+        seq_len = hyperparameters['seq_len_used']()
 
+    if 'num_features_used' in hyperparameters and callable(hyperparameters['num_features_used']):
+        hyperparameters['num_features_used'] = hyperparameters['num_features_used']()
+    else:
+        hyperparameters['num_features_used'] = hyperparameters.get('num_features_used', num_features)
+
+    args = {
+        'device': device,
+        'seq_len': seq_len,
+        'num_features': num_features,
+        'batch_size': batch_size_per_gp_sample,
+        **kwargs
+    }
+
+    # Create models and generate samples
     models = [FlexibleCategorical(get_batch, hyperparameters, args).to(device) for _ in range(num_models)]
+    samples = [model(batch_size=batch_size_per_gp_sample) for model in models]
 
-    sample = [model(batch_size=batch_size_per_gp_sample) for model in models]
-
-    x, y, y_ = zip(*sample)
-    x, y, y_ = torch.cat(x, 1).detach(), torch.cat(y, 1).detach(), torch.cat(y_, 1).detach()
+    # Concatenate results
+    x, y, y_ = zip(*samples)
+    x = torch.cat(x, dim=1).detach()
+    y = torch.cat(y, dim=1).detach()
+    y_ = torch.cat(y_, dim=1).detach()
 
     return x, y, y_
 
-# num_features_used = num_features_used_sampler()
-# prior_outputscale = prior_outputscale_sampler()
-# prior_lengthscale = prior_lengthscale_sampler()
-#
-# x, sample = normalize_data(x), normalize_data(sample)
-#
-# if is_binary_classification:
-#     sample = (sample > torch.median(sample, dim=0)[0]).float()
-#
-# if normalize_by_used_features:
-#     x = normalize_by_used_features_f(x, num_features_used, num_features)
-#
-# # # if is_binary_classification and order_y:
-# # #     x, sample = order_by_y(x, sample)
-# #
-# # Append empty features if enabled
-# x = torch.cat([x, torch.zeros((x.shape[0], x.shape[1], num_features - num_features_used), device=device)], -1)
 
 DataLoader = get_batch_to_dataloader(get_batch)
