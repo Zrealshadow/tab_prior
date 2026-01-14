@@ -38,7 +38,19 @@ def _sample_num_classes(min_classes, max_classes):
 
 
 class MulticlassRank(nn.Module):
-    """Assign classes based on rank thresholds."""
+    """
+    Assign classes based on rank thresholds.
+
+    Randomly samples data points as class boundaries, then assigns classes
+    based on how many boundaries each value exceeds.
+
+    Example:
+        values:     [0.1, 0.5, 0.3, 0.9, 0.7]  (regression targets)
+        boundaries: [0.3, 0.7]                  (sampled from data)
+        classes:    [0,   1,   0,   2,   1]    (count of exceeded boundaries)
+
+        If ordered_p=0.0, classes may be shuffled: [2, 0, 2, 1, 0]
+    """
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
         self.num_classes = _sample_num_classes(2, num_classes)
@@ -61,7 +73,19 @@ class MulticlassRank(nn.Module):
 
 
 class MulticlassValue(nn.Module):
-    """Assign classes based on fixed random thresholds."""
+    """
+    Assign classes based on fixed random thresholds.
+
+    Uses pre-sampled random thresholds (from standard normal) as class
+    boundaries. Unlike MulticlassRank, thresholds are independent of data.
+
+    Example:
+        values:     [0.1, 0.5, -0.3, 1.2, 0.8]  (regression targets)
+        thresholds: [0.0, 0.6]                   (fixed, sampled from N(0,1))
+        classes:    [1,   1,    0,   2,   2]    (count of exceeded thresholds)
+
+        If ordered_p=0.0, classes may be shuffled: [0, 0, 2, 1, 1]
+    """
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
         self.num_classes = _sample_num_classes(2, num_classes)
@@ -80,7 +104,21 @@ class MulticlassValue(nn.Module):
 
 
 class MulticlassMultiNode(nn.Module):
-    """Assign classes using softmax-based multinomial sampling."""
+    """
+    Assign classes using softmax-based multinomial sampling.
+
+    Requires 3D input (seq_len, batch, num_classes). Applies sigmoid to first
+    num_classes features, then samples class from multinomial distribution.
+    Falls back to MulticlassValue for 2D input.
+
+    Example:
+        x shape: (100, 8, 5)  with num_classes=3
+        logits:  x[:, :, :3]  -> shape (100, 8, 3)
+        probs:   sigmoid(logits) ** 3  (temperature scaling)
+        classes: multinomial(probs)    -> shape (100, 8), values in {0, 1, 2}
+
+        This creates soft, probabilistic class assignments based on feature values.
+    """
     def __init__(self, num_classes, ordered_p=0.5):
         super().__init__()
         self.num_classes = _sample_num_classes(2, num_classes)
@@ -98,7 +136,34 @@ class MulticlassMultiNode(nn.Module):
 
 
 def _create_class_assigner(num_classes, balanced, multiclass_type, ordered_p):
-    """Factory function to create the appropriate class assigner."""
+    """
+    Factory function to create the appropriate class assigner.
+
+    Args:
+        num_classes: 
+            Number of classes (0=regression, 2=binary, 3+=multiclass)
+        balanced: 
+            If True, use median split for binary (50/50 class balance)
+        multiclass_type: 
+            One of 'rank', 'value', 'multi_node'
+        ordered_p: 
+            Probability of preserving value ordering in class labels
+                   (1.0=ordinal, 0.0=nominal/shuffled)
+            
+            ordered (ordered_p=1.0):   classes = [0, 1, 2]  (value order preserved)
+            shuffled (ordered_p=0.0):  classes = [2, 0, 1]  (random permutation)
+
+            This simulates both:
+            - Ordinal classification: e.g., ratings (1-5 stars), grades (A/B/C)
+            - Nominal classification: e.g., categories (cat/dog/bird) with no inherent order
+    Returns:
+        nn.Module that converts regression targets to class labels
+
+    Decision tree:
+        num_classes=0                    -> RegressionNormalized (keep as regression)
+        num_classes=2, balanced=True     -> BalancedBinarize (median split)
+        num_classes>=2, balanced=False   -> MulticlassRank/Value/MultiNode
+    """
     if num_classes == 0:
         return RegressionNormalized()
 
@@ -150,7 +215,45 @@ class FlexibleCategorical(torch.nn.Module):
         )
 
     def _validate_hyperparameters(self):
-        """Validate hyperparameters and check for conflicts."""
+        """
+        Validate hyperparameters and check for conflicts.
+
+        Hyperparameter Tutorial:
+
+        1. TASK TYPE (num_classes, balanced)
+           num_classes=0              -> Regression
+           num_classes=2, balanced    -> Binary classification (50/50 split)
+           num_classes=3+             -> Multiclass classification
+
+        2. MULTICLASS METHOD (multiclass_type, output_multiclass_ordered_p)
+           multiclass_type='rank'     -> Class by rank position in data
+           multiclass_type='value'    -> Class by fixed thresholds
+           multiclass_type='multi_node' -> Class by softmax sampling
+           output_multiclass_ordered_p -> 1.0=ordinal, 0.0=nominal/shuffled
+
+        3. MISSING VALUES (nan_prob_*, set_value_to_nan)
+           nan_prob_no_reason         -> MCAR: random missing
+           nan_prob_a_reason          -> MAR: structured missing
+           nan_prob_unknown_reason    -> Mix of MCAR/MAR
+           set_value_to_nan           -> 1.0=NaN, 0.0=sentinel (-999,0,1,999)
+
+        4. FEATURES (num_features_used, categorical_feature_p)
+           num_features_used          -> Informative features (rest are zero-padded)
+           categorical_feature_p      -> Probability of categorical conversion
+
+        5. NORMALIZATION (normalize_to_ranking, normalize_labels)
+           normalize_to_ranking       -> True=rank transform, False=z-score
+           normalize_labels           -> Remap labels to 0,1,2,...
+           rotate_normalized_labels   -> Randomly shift label indices
+
+        Example minimal config:
+            {
+                'num_classes': 2, 'balanced': True,
+                'nan_prob_no_reason': 0.0, 'nan_prob_a_reason': 0.0,
+                'nan_prob_unknown_reason': 0.0, 'set_value_to_nan': 1.0,
+                'normalize_to_ranking': False, 'num_features_used': 10,
+            }
+        """
         h = self.h
         args = self.args
 
@@ -220,7 +323,17 @@ class FlexibleCategorical(torch.nn.Module):
     # Step 2: Add missing values
     # -------------------------------------------------------------------------
     def _add_missing_values(self, x):
-        """Inject missing values with different patterns."""
+        """
+        Inject missing values with different patterns.
+
+        Missing value representation controlled by 'set_value_to_nan':
+            1.0 -> Always use NaN
+            0.0 -> Always use sentinel values (-999, 0, 1, 999)
+            0.7 -> 70% NaN, 30% sentinel values
+
+        Note: Only NaN values are detected by torch.isnan(). Sentinel values
+        won't show up as missing in stats like torch.isnan(x).sum().
+        """
         h = self.h
         total_nan_prob = h['nan_prob_no_reason'] + h['nan_prob_a_reason'] + h['nan_prob_unknown_reason']
 
@@ -251,6 +364,7 @@ class FlexibleCategorical(torch.nn.Module):
     def _drop_random(self, x, value, prob):
         """MCAR: Drop values completely at random."""
         mask = torch.rand(x.shape, device=x.device) < random.random() * prob
+        # calculate mask number
         x[mask] = value
         return x
 
@@ -395,13 +509,16 @@ class FlexibleCategorical(torch.nn.Module):
 
         # Step 2: Add missing values
         x = self._add_missing_values(x)
-
+        # print(f"After missing: {torch.isnan(x).sum().item()}")
+        
         # Step 3: Make some features categorical
         x = self._make_categorical_features(x)
+        # print(f"After categorical: {torch.isnan(x).sum().item()}")
 
         # Step 4: Normalize features
         x, y = self._normalize_features(x, y)
-
+        # print(f"After normalize: {torch.isnan(x).sum().item()}")
+        
         # Step 5: Convert to classification
         y = self._assign_classes(y)
 

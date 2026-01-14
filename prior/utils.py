@@ -115,7 +115,19 @@ def normalize_by_used_features_f(x, num_features_used, num_features, normalize_w
 
 
 def get_nan_value(v, set_value_to_nan=0.0):
-    """Get NaN replacement value."""
+    """
+    Get missing value representation.
+
+    Args:
+        v: Value to return when using NaN (should be float('nan'))
+        set_value_to_nan: Probability of using NaN vs sentinel values
+            1.0 -> Always return NaN
+            0.0 -> Always return sentinel value (-999, 0, 1, or 999)
+            0.5 -> 50% NaN, 50% sentinel
+
+    Returns:
+        Either NaN or a random sentinel value based on probability.
+    """
     if random.random() < set_value_to_nan:
         return v
     else:
@@ -123,18 +135,33 @@ def get_nan_value(v, set_value_to_nan=0.0):
 
 
 def nan_handling_missing_for_unknown_reason_value(set_value_to_nan=0.0):
-    """Get value for unknown reason missing data."""
+    """
+    Get value for unknown reason missing data.
+
+    Args:
+        set_value_to_nan: Probability [0,1] of using NaN vs sentinel values.
+    """
     return get_nan_value(float('nan'), set_value_to_nan)
 
 
 def nan_handling_missing_for_no_reason_value(set_value_to_nan=0.0):
-    """Get value for no reason missing data."""
-    return get_nan_value(float('-inf'), set_value_to_nan)
+    """
+    Get value for MCAR (Missing Completely At Random) data.
+
+    Args:
+        set_value_to_nan: Probability [0,1] of using NaN vs sentinel values.
+    """
+    return get_nan_value(float('nan'), set_value_to_nan)
 
 
 def nan_handling_missing_for_a_reason_value(set_value_to_nan=0.0):
-    """Get value for reason-based missing data."""
-    return get_nan_value(float('inf'), set_value_to_nan)
+    """
+    Get value for MAR (Missing At Random) data.
+
+    Args:
+        set_value_to_nan: Probability [0,1] of using NaN vs sentinel values.
+    """
+    return get_nan_value(float('nan'), set_value_to_nan)
 
 
 # ============================================================================
