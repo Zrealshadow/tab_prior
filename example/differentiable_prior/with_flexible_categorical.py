@@ -35,10 +35,7 @@ hyperparameters = {
         'min': 2,
         'max': 5
     },
-    'prior_mlp_activations': {
-        'distribution': 'meta_choice',
-        'choice_values': ['relu', 'tanh', 'leaky_relu']
-    },
+    'prior_mlp_activations': 'random',
 
     # === FIXED MLP ===
     'prior_mlp_hidden_dim': 64,

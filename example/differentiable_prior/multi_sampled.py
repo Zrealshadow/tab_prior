@@ -34,10 +34,7 @@ hyperparameters = {
     },
 
     # meta_choice: also works for activation functions
-    'prior_mlp_activations': {
-        'distribution': 'meta_choice',
-        'choice_values': ['relu', 'tanh', 'leaky_relu']
-    },
+    'prior_mlp_activations': 'random',
 
     # === FIXED ===
     'prior_mlp_hidden_dim': 64,

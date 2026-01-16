@@ -24,22 +24,19 @@ hyperparameters = {
         'min': 2,
         'max': 7
     },
-    
+
     'prior_mlp_hidden_dim': {
         'distribution': 'meta_choice',
         'choice_values': [32, 64, 128, 256]
     },
-    
+
     'sampling': {
         'distribution': 'meta_choice',
         'choice_values': ['normal', 'uniform', 'mixed']
     },
-    
-    'prior_mlp_activations': {
-        'distribution': 'meta_choice',
-        'choice_values': ['relu', 'tanh', 'sigmoid', 'leaky_relu', 'elu', 'gelu', 'silu', 'softplus']
-    },
-    
+
+
+
     # === FIXED ===
     'is_causal': True,
     'num_causes': 10,
@@ -55,6 +52,7 @@ hyperparameters = {
     'in_clique': False,
     'random_feature_rotation': False,
     'new_mlp_per_example': False,
+    'prior_mlp_activations': 'random',
 }
 
 

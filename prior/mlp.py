@@ -11,29 +11,7 @@ from torch import nn
 import numpy as np
 
 from .utils import default_device, get_batch_to_dataloader
-
-
-# =============================================================================
-# Activation Functions
-# =============================================================================
-
-ACTIVATIONS = {
-    'relu': nn.ReLU,
-    'tanh': nn.Tanh,
-    'sigmoid': nn.Sigmoid,
-    'leaky_relu': nn.LeakyReLU,
-    'elu': nn.ELU,
-    'gelu': nn.GELU,
-    'silu': nn.SiLU,
-    'softplus': nn.Softplus,
-}
-
-
-def get_activation(name):
-    """Get activation class from string name."""
-    if name not in ACTIVATIONS:
-        raise ValueError(f"Unknown activation: '{name}'. Available: {list(ACTIVATIONS.keys())}")
-    return ACTIVATIONS[name]
+from .activation import get_activation, get_registered_activations
 
 
 # =============================================================================
@@ -88,8 +66,9 @@ def _validate_hyperparameters(hyperparameters):
 
     # Validate activation
     activation = h['prior_mlp_activations']
-    if activation not in ACTIVATIONS:
-        raise ValueError(f"Unknown activation: '{activation}'. Available: {list(ACTIVATIONS.keys())}")
+    valid_activations = list(get_registered_activations().keys()) + ['random']
+    if activation not in valid_activations:
+        raise ValueError(f"Unknown activation: '{activation}'. Available: {valid_activations}")
 
     # Validate sampling
     if h['sampling'] not in ['normal', 'uniform', 'mixed']:
@@ -110,7 +89,7 @@ def _sample_causes(num_causes):
 class MLPGenerator(nn.Module):
     """MLP-based data generator."""
 
-    def __init__(self, hyperparameters, seq_len, num_features, num_outputs, device, activation_class):
+    def __init__(self, hyperparameters, seq_len, num_features, num_outputs, device, activation_name):
         super().__init__()
 
         # Store hyperparameters as attributes
@@ -121,7 +100,7 @@ class MLPGenerator(nn.Module):
         self.num_features = num_features
         self.num_outputs = num_outputs
         self.device = device
-        self.activation_class = activation_class
+        self.activation_name = activation_name
 
         with torch.no_grad():
             self._build_network()
@@ -177,7 +156,10 @@ class MLPGenerator(nn.Module):
         return layers
 
     def _create_hidden_block(self, out_dim):
-        """Create a hidden layer block with activation and noise."""
+        """Create a hidden layer block with activation and noise.
+
+        Each layer samples its own activation when activation_name='random'.
+        """
         if self.pre_sample_weights:
             noise_std = torch.abs(torch.normal(
                 torch.zeros(size=(1, out_dim), device=self.device),
@@ -188,8 +170,11 @@ class MLPGenerator(nn.Module):
 
         noise = GaussianNoise(noise_std, device=self.device)
 
+        # Sample activation for this layer (allows different activations per layer)
+        activation_class = get_activation(self.activation_name)
+
         return [nn.Sequential(
-            self.activation_class(),
+            activation_class(),
             nn.Linear(self.prior_mlp_hidden_dim, out_dim),
             noise
         )]
@@ -383,18 +368,18 @@ def get_batch(batch_size, seq_len, num_features, hyperparameters, device=default
     if hyperparameters.get('multiclass_type') == 'multi_node':
         num_outputs = num_outputs * hyperparameters['num_classes']
 
-    # Get activation class
-    activation_class = get_activation(hyperparameters['prior_mlp_activations'])
+    # Get activation name (sampled per layer in MLPGenerator)
+    activation_name = hyperparameters['prior_mlp_activations']
 
     # Create model(s)
     if hyperparameters.get('new_mlp_per_example', False):
         def get_model():
             return MLPGenerator(
-                hyperparameters, seq_len, num_features, num_outputs, device, activation_class
+                hyperparameters, seq_len, num_features, num_outputs, device, activation_name
             ).to(device)
     else:
         model = MLPGenerator(
-            hyperparameters, seq_len, num_features, num_outputs, device, activation_class
+            hyperparameters, seq_len, num_features, num_outputs, device, activation_name
         ).to(device)
         get_model = lambda: model
 
