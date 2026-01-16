@@ -1,4 +1,4 @@
-# Tab Prior: Synthetic Tabular Data with Causal Structure
+# Synthetic Tabular Data with Causal Structure
 
 ![img](./_icon.jpg)
 Tab Prior is a lightweight library extracted from TabPFN that focuses entirely on building rich synthetic tabular datasets. It is designed for researchers who need controllable data with correlated features, customizable causal structures, and configurable noise processes to benchmark tabular models or explore counterfactual scenarios.
