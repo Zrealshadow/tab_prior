@@ -60,7 +60,7 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     x, y, _ = flexible_categorical.get_batch(
-        batch_size=8,
+        batch_size=64,
         seq_len=100,
         num_features=20,
         get_batch=mlp.get_batch,

@@ -619,7 +619,7 @@ class RandomConfigPrior(nn.Module):
     def forward(self):
         # Sample hyperparameters (fixed values returned as-is, samplers sampled)
         hyperparameters = self.hp_space.sample()
-
+        
         # Generate data
         x, y, y_clean = self.get_batch(hyperparameters=hyperparameters, **self.args)
 
@@ -633,7 +633,9 @@ class RandomConfigPrior(nn.Module):
 @torch.no_grad()
 def get_batch(batch_size: int, seq_len: int, num_features: int, get_batch,
               device, hyperparameters: Optional[dict] = None,
-              batch_size_per_gp_sample: Optional[int] = None, **kwargs):
+              batch_size_per_gp_sample: Optional[int] = None, 
+              verbose: Optional[bool] = False,
+              **kwargs):
     """
     Generate batches with randomly sampled hyperparameters.
 
@@ -651,7 +653,7 @@ def get_batch(batch_size: int, seq_len: int, num_features: int, get_batch,
             - Plain values (fixed)
             - Dict with 'distribution' key (sampled per sub-batch)
         batch_size_per_gp_sample: Sub-batch size (samples sharing same config)
-
+        verbose: Whether to print verbose output
     Returns:
         x: Features, shape (seq_len, batch_size, num_features)
         y: Targets, shape (seq_len, batch_size)
@@ -695,14 +697,9 @@ def get_batch(batch_size: int, seq_len: int, num_features: int, get_batch,
         **kwargs
     }
 
-    # Create models with different random configs
-    models = [
-        RandomConfigPrior(get_batch, hyperparameters, args)
-        for _ in range(num_models)
-    ]
-
-    # Generate samples
-    samples = [model() for model in models]
+    # Create single model and generate samples (each forward() samples fresh hyperparameters)
+    model = RandomConfigPrior(get_batch, hyperparameters, args)
+    samples = [model() for _ in range(num_models)]
 
     # Concatenate results
     x, y, y_clean = zip(*samples)

@@ -207,13 +207,6 @@ class FlexibleCategorical(torch.nn.Module):
 
         self._validate_hyperparameters()
 
-        self.class_assigner = _create_class_assigner(
-            num_classes=self.h['num_classes'],
-            balanced=self.h['balanced'],
-            multiclass_type=self.h.get('multiclass_type', 'rank'),
-            ordered_p=self.h.get('output_multiclass_ordered_p', 0.5)
-        )
-
     def _validate_hyperparameters(self):
         """
         Validate hyperparameters and check for conflicts.
@@ -411,8 +404,14 @@ class FlexibleCategorical(torch.nn.Module):
     # Step 5: Convert to classification
     # -------------------------------------------------------------------------
     def _assign_classes(self, y):
-        """Convert regression targets to class labels."""
-        return self.class_assigner(y).float()
+        """Convert regression targets to class labels (creates fresh assigner each call)."""
+        class_assigner = _create_class_assigner(
+            num_classes=self.h['num_classes'],
+            balanced=self.h['balanced'],
+            multiclass_type=self.h.get('multiclass_type', 'rank'),
+            ordered_p=self.h.get('output_multiclass_ordered_p', 0.5)
+        )
+        return class_assigner(y).float()
 
     # -------------------------------------------------------------------------
     # Step 6: Scale and pad features
@@ -503,7 +502,7 @@ class FlexibleCategorical(torch.nn.Module):
     # -------------------------------------------------------------------------
     # Main forward pass
     # -------------------------------------------------------------------------
-    def forward(self, batch_size):
+    def forward(self):
         # Step 1: Generate raw data
         x, y, _ = self._generate_raw_data()
 
@@ -576,9 +575,9 @@ def get_batch(batch_size, seq_len, num_features, get_batch, device,
         **kwargs
     }
 
-    # Create models and generate samples
-    models = [FlexibleCategorical(get_batch, hyperparameters, args).to(device) for _ in range(num_models)]
-    samples = [model(batch_size=batch_size_per_gp_sample) for model in models]
+    # Create single model and generate samples (each forward() samples fresh randomness)
+    model = FlexibleCategorical(get_batch, hyperparameters, args).to(device)
+    samples = [model() for _ in range(num_models)]
 
     # Concatenate results
     x, y, y_ = zip(*samples)
@@ -590,3 +589,4 @@ def get_batch(batch_size, seq_len, num_features, get_batch, device,
 
 
 DataLoader = get_batch_to_dataloader(get_batch)
+
